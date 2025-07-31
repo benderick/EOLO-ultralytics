@@ -1,0 +1,192 @@
+import math
+import torch
+import torch.nn as nn
+from pytorch_wavelets import DWTForward
+__all__ = ['MBFD', 'FMBFD']
+
+class TiedBlockConv2d(nn.Module):
+    '''Tied Block Conv2d'''
+    def __init__(self, in_planes, planes, kernel_size, stride=1, padding=0, bias=True, B=1, args=None, dropout_tbc=0.0, groups=1, dilation=1):
+        super(TiedBlockConv2d, self).__init__()
+        assert planes % B == 0
+        assert in_planes % B == 0
+        self.B = B
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.out_planes = planes
+        self.kernel_size = kernel_size
+        self.dropout_tbc = dropout_tbc
+        self.conv = nn.Conv2d(in_planes//self.B, planes//self.B, kernel_size=kernel_size, stride=stride, \
+                    padding=padding, bias=bias, groups=groups, dilation=dilation)
+        if self.dropout_tbc > 0.0:
+            self.drop_out = nn.Dropout(self.dropout_tbc)
+    def forward(self, x):
+        n, c, h, w = x.size()
+        x = x.contiguous().view(n*self.B, c//self.B, h, w)
+        h_o = (h - self.kernel_size - (self.kernel_size-1)*(self.dilation-1) + 2*self.padding) // self.stride + 1
+        w_o = (w - self.kernel_size - (self.kernel_size-1)*(self.dilation-1) + 2*self.padding) // self.stride + 1
+        x = self.conv(x)
+        x = x.view(n, self.out_planes, h_o, w_o)
+        if self.dropout_tbc > 0:
+            x = self.drop_out(x)
+        return x
+
+class Down_wt(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super(Down_wt, self).__init__()
+        self.wt = DWTForward(J=1, mode='zero', wave='haar')
+        self.conv_bn_relu = nn.Sequential(
+            nn.Conv2d(in_ch * 2, out_ch, kernel_size=1, stride=1),
+            nn.BatchNorm2d(out_ch),  
+            nn.SiLU(), 
+        )
+    def forward(self, x):
+        yL, yH = self.wt(x)
+        y_HL = yH[0][:, :, 0, :]  # 水平高频
+        y_LH = yH[0][:, :, 1, :]  # 垂直高频
+        y_HH = yH[0][:, :, 2, :]  # 对角高频
+        x = torch.cat([yL, yL+y_HL+y_LH+y_HH], dim=1)
+        x = self.conv_bn_relu(x)
+        return x
+
+def autopad(k, p=None, d=1):  # kernel, padding, dilation
+    """Pad to 'same' shape outputs."""
+    if d > 1:
+        k = d * (k - 1) + 1 if isinstance(k, int) else [d * (x - 1) + 1 for x in k]  # actual kernel-size
+    if p is None:
+        p = k // 2 if isinstance(k, int) else [x // 2 for x in k]  # auto-pad
+    return p
+
+class Conv(nn.Module):
+    """Standard convolution with args(ch_in, ch_out, kernel, stride, padding, groups, dilation, activation)."""
+
+    default_act = nn.SiLU()  # default activation
+
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        """Initialize Conv layer with given arguments including activation."""
+        super().__init__()
+        self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+
+    def forward(self, x):
+        """Apply convolution, batch normalization and activation to input tensor."""
+        return self.act(self.bn(self.conv(x)))
+
+    def forward_fuse(self, x):
+        """Apply convolution and activation without batch normalization."""
+        return self.act(self.conv(x))
+
+class PTConv(nn.Module):
+    def __init__(self, dim, k=3, s=1, p=1, d=1, n_div=2, nwa=True):
+        super().__init__()
+        self.dim_conv3 = dim // n_div
+        self.dim_untouched = dim - self.dim_conv3
+        self.partial_conv3 = nn.Conv2d(self.dim_conv3, self.dim_conv3, kernel_size=k, stride=s, padding=p, dilation=d, bias=False)
+        self.tied_conv = TiedBlockConv2d(self.dim_untouched, self.dim_untouched, kernel_size=k, stride=s, padding=p, dilation=d, bias=False)
+        self.nwa = nwa
+        if nwa:
+            self.norm = nn.BatchNorm2d(dim)
+            self.act = nn.SiLU()
+        
+    def forward(self, x):
+        x1, x2 = torch.split(x, [self.dim_conv3, self.dim_untouched], dim=1)
+        x1 = self.partial_conv3(x1)
+        x2 = self.tied_conv(x2)
+        x2_1, x2_2 = torch.chunk(x2, 2, dim=1)
+        x = torch.cat((x2_1, x1, x2_2), 1)
+        if self.nwa:
+            x = self.act(self.norm(x))
+        return x
+    
+
+class SPDConv(nn.Module):
+    # Changing the dimension of the Tensor
+    def __init__(self, inc, ouc):
+        super().__init__()
+        self.conv = Conv(inc * 4, ouc, act=nn.ReLU(inplace=True), k=3, s=1, p=1)
+
+    def forward(self, x):
+        x = torch.cat([x[...,  ::2,  ::2],
+                       x[..., 1::2,  ::2], 
+                       x[...,  ::2, 1::2],
+                       x[..., 1::2, 1::2]
+                      ], 1)
+        x = self.conv(x)
+        return x
+
+class FMBFD(nn.Module):
+    """
+    首层多分支融合下采样模块（First-layer Multi-branch Fusion Downsampling, FMBFD）
+    用于首层（从三通道出发）的下采样
+    """
+    def __init__(self, in_channels=3, out_channels=16):
+        super().__init__()
+        self.proj_first = Conv(in_channels, out_channels//2, k=3, s=1, p=1)
+        
+        self.conv1 = SPDConv(in_channels, out_channels//2)
+        
+        self.conv2 = Conv(out_channels//2, out_channels//2, k=3, s=2, p=1, g=out_channels//2)
+        
+        self.conv3 = PTConv(out_channels//2, k=3, s=2, p=1, d=1, n_div=2)
+        
+        self.conv4 = Down_wt(in_channels, out_channels//2)
+        
+        self.proj_last = Conv(2*out_channels, out_channels)
+
+    def forward(self, x):
+        c = self.proj_first(x)
+
+        c1 = self.conv1(x)     
+        c2 = self.conv2(c)
+        c3 = self.conv3(c)
+        c4 = self.conv4(x)
+
+        x = torch.cat([c1, c2, c3, c4], dim=1)
+        x = self.proj_last(x)
+        return x
+
+class MBFD(nn.Module):
+    """
+    多分支融合下采样模块（Multi-branch Fusion Downsampling, MBFD）
+    该模块融合了深度可分离卷积、部分通道卷积和小波变换三种不同的下采样方式，
+    通过通道拼接和1x1卷积实现高效特征融合，提升下采样阶段的特征表达能力。
+    """
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.proj_first = Conv(in_channels, out_channels, k=3, s=1, p=1, g=math.gcd(in_channels, out_channels))
+        
+        self.conv1 = Conv(out_channels, out_channels//2, k=3, s=2, p=1, g=out_channels//2)
+        
+        self.conv2 = PTConv(out_channels, k=3, s=2, p=1, d=1, n_div=2)
+        
+        self.harr = Down_wt(in_channels, out_channels // 2)
+        
+        self.proj_last = Conv(2*out_channels, out_channels, k=1, s=1)
+
+    def forward(self, x):
+        c = self.proj_first(x)
+
+        c1 = self.conv1(c)     
+        c2 = self.conv2(c)
+        w = self.harr(x)
+
+        x = torch.cat([c1, c2, w], dim=1)
+        
+        x = self.proj_last(x)
+        return x
+
+if __name__ == "__main__":
+    # Example usage
+    batch_size = 1
+    channels = 3
+    height = 256
+    width = 256
+
+    input_tensor = torch.randn(batch_size, channels, height, width)
+    model = FMBFD(in_channels=channels, out_channels=32)
+    output_tensor = model(input_tensor)
+
+    print("Input shape:", input_tensor.shape)
+    print("Output shape:", output_tensor.shape)
