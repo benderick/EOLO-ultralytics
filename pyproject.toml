@@ -130,7 +130,7 @@ my-extra = [
     "pytorch-wavelets",
     "timm==1.0.7",
     "mmcv==2.2.0",
-    "mmengine==0.10.4"
+    "mmengine==0.10.7"
     # "basicsr",
 ]
 
