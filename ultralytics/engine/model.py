@@ -817,14 +817,21 @@ class Model(torch.nn.Module):
 
         checks.check_pip_update_available()
 
-        overrides = yaml_load(checks.check_yaml(kwargs["cfg"])) if kwargs.get("cfg") else self.overrides
+        # overrides = yaml_load(checks.check_yaml(kwargs["cfg"])) if kwargs.get("cfg") else self.overrides
+
+        overrides = kwargs["cfg"] if kwargs.get("cfg") else self.overrides
+
         custom = {
             # NOTE: handle the case when 'cfg' includes 'data'.
             "data": overrides.get("data") or DEFAULT_CFG_DICT["data"] or TASK2DATA[self.task],
             "model": self.overrides["model"],
             "task": self.task,
         }  # method defaults
-        args = {**overrides, **custom, **kwargs, "mode": "train", "model_dict_str": self.model_dict_str}  # highest priority args on the right
+        try:
+            args = {**overrides, **custom, **kwargs, "mode": "train", "model_dict_str": self.model_dict_str}  # highest priority args on the right
+        except:
+             args = {**overrides, **custom, **kwargs, "mode": "train", "model_dict_str": ""}
+            
         if args.get("resume"):
             args["resume"] = self.ckpt_path
 

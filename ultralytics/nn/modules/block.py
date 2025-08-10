@@ -635,7 +635,7 @@ class AConv(nn.Module):
 class ADown(nn.Module):
     """ADown."""
 
-    def __init__(self, c1, c2):
+    def __init__(self, c1, c2, ph1=None, ph2=None):
         """Initializes ADown module with convolution layers to downsample input from channels c1 to c2."""
         super().__init__()
         self.c = c2 // 2

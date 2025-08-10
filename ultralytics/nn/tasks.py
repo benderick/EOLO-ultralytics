@@ -1,7 +1,9 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-from .workpieces import *
-from .workpieces_manual import *
+from ultralytics.nn.workpieces import *
+# from ultralytics.nn.workpieces.convolution import *
+# from ultralytics.nn.workpieces.block import *
+
 import contextlib
 import pickle
 import re
@@ -26,7 +28,7 @@ from ultralytics.nn.modules import (
     SPPF,
     A2C2f,
     AConv,
-    ADown,
+    # ADown,
     Bottleneck,
     BottleneckCSP,
     C2f,
@@ -325,7 +327,7 @@ class DetectionModel(BaseModel):
         # Build strides
         m = self.model[-1]  # Detect()
         if isinstance(m, (Detect, *detection_head_list)):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
-            s = 256  # 2x min stride
+            s = 640  # 2x min stride
             m.inplace = self.inplace
 
             def _forward(x):
@@ -334,7 +336,7 @@ class DetectionModel(BaseModel):
                     return self.forward(x)["one2many"]
                 return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
 
-            m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(2, ch, s, s))])  # forward
             self.stride = m.stride
             m.bias_init()  # only run once
         else:
@@ -950,8 +952,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
 
     # 加载components配置
-    components_path = Path(__file__).parent / 'components.yaml'
-    components = yaml_load(components_path)
+    # components_path = Path(__file__).parent / 'components.yaml'
+    # components = yaml_load(components_path)
     
     default_base_modules=[
             "Classify",
@@ -973,7 +975,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             "C3k2",
             "RepNCSPELAN4",
             "ELAN1",
-            "ADown",
+            # "ADown",
             "AConv",
             "SPPELAN",
             "C2fAttn",
@@ -991,14 +993,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     ]
     
     # 构建base_modules集合
-    base_modules = frozenset({
+    base_modules = set({
         getattr(torch.nn, name[3:])
             if "nn." in name
             else getattr(__import__("torchvision").ops, name[16:])
             if "torchvision.ops." in name
             else globals()[name]
-        for name in components['base_modules'] + default_base_modules
+        for name in default_base_modules
     })
+    
+    base_modules = base_modules.union(ij_list, nij_list)
     
     default_repeat_modules = [
             "BottleneckCSP",
@@ -1019,16 +1023,28 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     ]
     
     # 构建repeat_modules集合 
-    repeat_modules = frozenset({
+    repeat_modules = set({
         getattr(torch.nn, name[3:])
             if "nn." in name
             else getattr(__import__("torchvision").ops, name[16:])
             if "torchvision.ops." in name
             else globals()[name]
-        for name in components['repeat_modules'] + default_repeat_modules
+        for name in default_repeat_modules
     })
+    
+    repeat_modules = repeat_modules.union(nij_list)
 
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
+        # --获取模块类-----------处理生成的模块名称和参数-------------
+        # if m.startswith("C3k2_"):
+        #     m : str
+        #     m_right = m[m.index("_") + 1:]  # C3k2_legacy -> C3k2
+        #     m_right = globals()[m_right]
+        #     m = make_C3k2_class(m, m_right)
+        #     # 将动态创建的C3k2类添加到相应的模块集合中
+        #     base_modules.add(m)
+        #     repeat_modules.add(m)
+        # else:  
         m = (
             getattr(torch.nn, m[3:])
             if "nn." in m
@@ -1036,6 +1052,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             if "torchvision.ops." in m
             else globals()[m]
         )  # get module
+        # ---------------------------------------------
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
@@ -1053,6 +1070,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             if m in repeat_modules:
                 args.insert(2, n)  # number of repeats
                 n = 1
+            if "C3k2" in m.__name__:  # C3k2 legacy
+                legacy = False
             if m is C3k2:  # for M/L/X sizes
                 legacy = False
                 if scale in "mlx":
@@ -1061,25 +1080,14 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 legacy = False
                 if scale in "lx":  # for L/X sizes
                     args.extend((True, 1.2))
-        elif m is AIFI:
-            args = [ch[f], *args]
-        elif m in frozenset({HGStem, HGBlock, EIEStem}): # type: ignore
-            c1, cm, c2 = ch[f], args[0], args[1]
-            if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
-                c2 = make_divisible(min(c2, max_channels) * width, 8)
-                cm = make_divisible(min(cm, max_channels) * width, 8)
-            args = [c1, cm, c2, *args[2:]]
-            if m is HGBlock:
-                args.insert(4, n)  # number of repeats
-                n = 1
         elif m is ResNetLayer:
             c2 = args[1] if args[3] else args[1] * 4
         elif m is torch.nn.BatchNorm2d:
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in frozenset({Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect, *detection_head_list}):
-            args.append([ch[x] for x in f])
+        elif m in frozenset({Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect, *detection_head_list}): # head
+            args.insert(1, [ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
             if m in {Detect, Segment, Pose, OBB}:
@@ -1096,28 +1104,30 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = args[0]
             c1 = ch[f]
             args = [*args[1:]]
-        elif m in frozenset({Dy_Sample, TripleAttention, LAWDS, CoordAtt}):  # type: ignore
+        elif m in frozenset({AIFI, *i_list}):  # style: i
             c2 = ch[f]
             args = [c2, *args]
-        elif m in {SBA}: # type: ignore
+        elif m in frozenset({HGStem, HGBlock, *ijk_list}): # style: ijk
+            c1, cm, c2 = ch[f], args[0], args[1]
+            if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+                cm = make_divisible(min(cm, max_channels) * width, 8)
+            args = [c1, cm, c2, *args[2:]]
+            if m is HGBlock:
+                args.insert(4, n)  # number of repeats
+                n = 1
+        elif m in {*l_list}: # style: l
             c1 = [ch[x] for x in f]
-            c2 = c1[-1]
-            args = [c1, c2]
-        elif m in {CSPOmniKernel, BlurPool, D2SUpsample}:
-            c2 = ch[f]
-            args = [c2]
-        elif m in {SimAM}:
-            c2 = ch[f]
-            args = [*args]
-        elif m in {MFM}:
-            if args[0] == 'head_channel':
-                args[0] = d[args[0]]
-            c1 = [ch[x] for x in f]
-            c2 = make_divisible(min(args[0], max_channels) * width, 8)
+            c2 = sum(ch[x] for x in f)
             args = [c1, c2, *args[1:]]
+            # if len(args) > 0 and isinstance(args[0], int) and args[0] != nc:
+            #     c2 = make_divisible(min(args[0], max_channels) * width, 8)
+            #     args = [c1, c2, *args[1:]]
+            # else:
+            #     c2 = c1[-1]
+            #     args = [c1, c2, *args]
         else:
             c2 = ch[f]
-
         m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
         t = str(m)[8:-2].replace("__main__.", "")  # module type
         m_.np = sum(x.numel() for x in m_.parameters())  # number params

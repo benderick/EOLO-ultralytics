@@ -177,3 +177,4 @@ calibration_*.npy
 
 **/logs/*
 !logs/.gitkeep
+!ultralytics/logs/db.db

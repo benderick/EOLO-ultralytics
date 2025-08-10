@@ -108,7 +108,9 @@ class BaseTrainer:
         self.plots = {}
         init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
         
-        self.logger = DictConfig(eval(self.args.get("logger", "None")))
+        # self.logger = DictConfig(eval(self.args.get("logger", "None")))
+        # self.logger = eval(self.args.get("logger", "None"))
+        self.logger = self.args.get("logger", "None")
 
         # Dirs
         self.save_dir = get_save_dir(self.args)

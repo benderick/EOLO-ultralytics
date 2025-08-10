@@ -207,8 +207,9 @@ def add_integration_callbacks(instance):
         from .raytune import callbacks as tune_cb
         from .tensorboard import callbacks as tb_cb
         from .wb import callbacks as wb_cb
+        from .db import callbacks as db_cb
 
-        callbacks_list.extend([clear_cb, comet_cb, dvc_cb, mlflow_cb, neptune_cb, tune_cb, tb_cb, wb_cb])
+        callbacks_list.extend([clear_cb, comet_cb, dvc_cb, mlflow_cb, neptune_cb, tune_cb, tb_cb, wb_cb, db_cb])
 
     # Add the callbacks to the callbacks dictionary
     for callbacks in callbacks_list:

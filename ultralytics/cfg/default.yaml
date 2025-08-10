@@ -127,6 +127,8 @@ cfg: # (str, optional) for overriding defaults.yaml
 # Tracker settings ------------------------------------------------------------------------------------------------------
 tracker: botsort.yaml # (str) tracker type, choices=[botsort.yaml, bytetrack.yaml]
 
+
+# 添加的配置项
 logger: #
 model_dict_str: #
 data_layout: images-labels

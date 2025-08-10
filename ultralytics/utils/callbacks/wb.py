@@ -1,8 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-from ultralytics.utils import SETTINGS, TESTS_RUNNING, oc_to_dict
+from ultralytics.utils import SETTINGS, TESTS_RUNNING
 from ultralytics.utils.torch_utils import model_info_for_loggers
-from ultralytics.utils.database import Run
 
 try:
     assert not TESTS_RUNNING  # do not log pytest
@@ -126,18 +125,23 @@ def on_pretrain_routine_start(trainer):
     
     if not wb.run:
         logger_info = trainer.logger
-        wb.init(
-            project=project if trainer.args.project else "Ultralytics",
-            group=logger_info.group,
-            name=name,
-            config=vars(trainer.args),
-            dir=trainer.save_dir.parent
-        )
-        wb.run.notes = str(logger_info.notes)
-        wb.run.tags = logger_info.tags
-        run = Run.create(id=wb.run.id, location=str(trainer.save_dir.parent),**oc_to_dict(logger_info))
-        # run.tags = str(run.tags)
-        run.save()
+        if logger_info["group"]:
+            wb.init(
+                project=project if trainer.args.project else "Ultralytics",
+                group=logger_info["group"],
+                name=name,
+                config=vars(trainer.args),
+                dir=trainer.save_dir.parent
+            )
+        else:
+            wb.init(
+                project=project if trainer.args.project else "Ultralytics",
+                name=name,
+                config=vars(trainer.args),
+                dir=trainer.save_dir.parent
+            )
+        wb.run.notes = str(logger_info["notes"])
+        wb.run.tags = logger_info["tags"]
 
 
 def on_fit_epoch_end(trainer):
@@ -148,44 +152,6 @@ def on_fit_epoch_end(trainer):
     if trainer.epoch == 0:
         wb.run.log(model_info_for_loggers(trainer), step=trainer.epoch + 1)
     
-    # 记录模型的mAP和mAP50到数据库
-    epoche_list = [50, 100, 150, 200, 250]
-    if trainer.epoch in epoche_list:
-        run = Run.get(Run.id == wb.run.id)
-        run.map = eval(run.map) + [trainer.metrics["metrics/mAP50-95(B)"]]
-        run.map50 = eval(run.map50) + [trainer.metrics["metrics/mAP50(B)"]]
-        run.save()
-        return # 暂停低指标中断
-        # 对于非基本模型，在低于基本模型的map和map50时停止训练
-        if not run.is_basic:
-            idx = epoche_list.index(trainer.epoch)
-            basics = Run.select().where((Run.project == run.project) & Run.is_basic)
-            true_basics_map = []
-            true_basics_map50 = []
-            try:
-                for basic in basics:
-                    if set(eval(basic.tags)) & set(eval(run.tags)):
-                        true_basics_map.append(eval(basic.map)[idx])    
-                        true_basics_map50.append(eval(basic.map50)[idx])  
-            except:
-                print("在获取基本模型的map和map50时发生错误")
-            if len(true_basics_map) > 0 and len(true_basics_map50) > 0:
-                run_map = trainer.metrics["metrics/mAP50-95(B)"]
-                run_map50 = trainer.metrics["metrics/mAP50(B)"]
-                for map in true_basics_map:
-                    if run_map < map * 0.95:
-                        trainer.need_to_finish = True
-                        break
-                for map50 in true_basics_map50:
-                    if run_map50 < map50 * 0.9:
-                        trainer.need_to_finish = True
-                        break
-                if trainer.need_to_finish:
-                    print("触发低指标中断")
-                    wb.run.alert(title="低指标中断",
-                                text=f"Run {run.id} was killed because of low metrics in epoch {trainer.epoch}. \n In project {run.project}, name {run.name}, tags {run.tags}.",
-                                level=wb.AlertLevel.WARN,
-                                wait_duration=300,)
 
 def on_train_epoch_end(trainer):
     """Log metrics and save images at the end of each training epoch."""
@@ -200,9 +166,9 @@ def on_train_end(trainer):
     _log_plots(trainer.validator.plots, step=trainer.epoch + 1)
     _log_plots(trainer.plots, step=trainer.epoch + 1)
     art = wb.Artifact(type="model", name=f"run_{wb.run.id}_model")
-    if trainer.best.exists():
-        art.add_file(trainer.best)
-        wb.run.log_artifact(art, aliases=["best"])
+    # if trainer.best.exists():
+    #     art.add_file(trainer.best)
+    #     wb.run.log_artifact(art, aliases=["best"])
     # Check if we actually have plots to save
     if trainer.args.plots and hasattr(trainer.validator.metrics, "curves_results"):
         for curve_name, curve_values in zip(trainer.validator.metrics.curves, trainer.validator.metrics.curves_results):
